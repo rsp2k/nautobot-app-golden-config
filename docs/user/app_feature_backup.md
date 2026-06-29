@@ -165,4 +165,13 @@ git log --author=jdoe
 
 # What changed during a maintenance window
 git log --since='2025-06-01' --until='2025-06-15'
+
+# The exact config change in one backup commit
+git show <commit> -- devices/<name>.cfg
 ```
+
+Because each snapshot is its own commit, a single device change is an ordinary,
+reviewable diff:
+
+![Per-device backup config diff](../images/ss1_rancid-config-diff_light.png#only-light){ .on-glb }
+![Per-device backup config diff](../images/ss1_rancid-config-diff_dark.png#only-dark){ .on-glb }
