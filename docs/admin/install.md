@@ -61,6 +61,8 @@ PLUGINS_CONFIG = {
         "enable_plan": True,
         "enable_deploy": True,
         "enable_postprocessing": False,
+        "enable_rancid_backup": False,
+        "rancid_email_domain": "example.com",
         "sot_agg_transposer": None,
         "postprocessing_callables": [],
         "postprocessing_subscribed": [],
@@ -107,6 +109,8 @@ The app behavior can be controlled with the following list of settings:
 | enable_plan               | True                          | True    | A boolean to represent whether or not to allow the config plan job to run.                                                                                                 |
 | enable_deploy             | True                          | True    | A boolean to represent whether or not to be able to deploy configs to network devices.                                                                                     |
 | enable_postprocessing     | True                          | False    | A boolean to represent whether or not to generate intended configurations to push, with extra processing such as secrets rendering.                                       |
+| enable_rancid_backup      | True                          | False    | A boolean to enable rancid-style backups: one commit per device per snapshot, authored and dated from the device's config, with hostname renames tracked as git renames. |
+| rancid_email_domain       | "example.com"                 | "example.com" | The email domain used to build the commit author address (`<user>@<domain>`) for rancid-style backups when the author is parsed from the config.                    |
 | default_deploy_status     | "Not Approved"                | "Not Approved" | A string that will be the name of the status you want as the default when create new config plans, you MUST create the status yourself before starting the app.     |
 | postprocessing_callables  | ['mypackage.myfunction']      | []      | A list of function paths, in dotted format, that are appended to the available methods for post-processing the intended configuration, for instance, the `render_secrets`. |
 | postprocessing_subscribed | ['mypackage.myfunction']      | []      | A list of function paths, that should exist as postprocessing_callables, that defines the order of application of during the post-processing process.                      |

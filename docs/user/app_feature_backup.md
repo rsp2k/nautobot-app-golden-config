@@ -92,3 +92,70 @@ The line replace uses Python's `re.sub` method. As shown, a common pattern is to
 ```python
 re.sub(r"(username\s+\S+\spassword\s+5\s+)\S+(\s+role\s+\S+)", r"\1<redacted_config>\2", config, flags=re.MULTILINE))
 ```
+
+## Rancid-Style Backups (per-device commits)
+
+By default the backup job creates a single git commit per job run, containing every
+device's config, authored by the automation user and stamped with the job run time.
+History lives in the backup repository, keyed by the rendered `backup_path_template`
+(typically a hostname/location path).
+
+Rancid-style backups change this so that history tracks the *physical device* the way
+a rancid archive does:
+
+| Axis | Default | Rancid-style |
+| --- | --- | --- |
+| Commit cadence | one per job run (all devices) | one per device per snapshot |
+| Commit author | automation user | the engineer named on the config's `Last configuration change` line |
+| Commit timestamp | job run time | the config's last-change time, falling back to the backup time |
+| File identity | rendered `backup_path_template` | the device, tracked by its Nautobot UUID |
+| Hostname renames | new file appears, old one orphaned | recorded as a git rename, so `git log --follow` traces the device |
+
+Device identity is the stable Nautobot Device UUID, so a hostname rename (which changes
+the rendered `backup_path_template`) is detected and committed as a `git mv`. The
+UUID-to-path mapping is stored in a `.golden-rancid-manifest.json` file inside the
+backup repository, so the feature keeps no state outside the repo.
+
+### Enabling
+
+Set `enable_rancid_backup` to `True` in the app settings (see the
+[install guide](../admin/install.md#app-configuration)). It is disabled by default;
+when off, the standard single-commit-per-run behavior is used unchanged. Only the
+backup repository is affected — intended and compliance repositories always use the
+standard commit behavior.
+
+```python
+PLUGINS_CONFIG = {
+    "nautobot_golden_config": {
+        "enable_rancid_backup": True,
+        "rancid_email_domain": "example.com",  # builds <user>@<domain> for parsed authors
+    }
+}
+```
+
+### Author and timestamp parsing
+
+The author and original change time come from the device config's
+`! Last configuration change at <time> by <user>` line. When that line is absent the
+commit falls back to the backup time and the backup repository's configured git
+identity, so backups always succeed even without attribution.
+
+!!! warning
+    If a `Config Removal` regex strips the `Last configuration change` line (a common
+    pattern, since the timestamp changes on every backup and otherwise causes noisy
+    diffs), the per-engineer author and original timestamp cannot be recovered, and
+    commits fall back to the backup time and automation identity. To keep attribution,
+    leave that line in the backup.
+
+### Example queries
+
+```bash
+# Full history of one device, traced through any hostname renames
+git log --follow devices/<name>.cfg
+
+# Everything an engineer changed across the fleet
+git log --author=jdoe
+
+# What changed during a maintenance window
+git log --since='2025-06-01' --until='2025-06-15'
+```

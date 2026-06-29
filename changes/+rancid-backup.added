@@ -1,0 +1,1 @@
+Added an opt-in `enable_rancid_backup` mode that records config backups as one git commit per device per snapshot, authored and dated from the device config, with hostname renames tracked as git renames so `git log --follow` traces a device.
