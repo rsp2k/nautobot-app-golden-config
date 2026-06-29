@@ -48,6 +48,7 @@ from nautobot_golden_config.utilities.helper import (
     get_job_filter,
     update_dynamic_groups_cache,
 )
+from nautobot_golden_config.utilities.rancid import rancid_commit_and_push
 
 InventoryPluginRegister.register("nautobot-inventory", NautobotORMInventory)
 
@@ -135,6 +136,11 @@ def gc_repo_prep(job, data):
     return current_repos
 
 
+def _is_backup_repo(repo_obj):
+    """Return True if this GitRepo provides backup configs."""
+    return "nautobot_golden_config.backupconfigs" in repo_obj.nautobot_repo_obj.provided_contents
+
+
 def gc_repo_push(job, current_repos, commit_message=""):
     """Push any work from worker to git repos in Job.
 
@@ -150,11 +156,18 @@ def gc_repo_push(job, current_repos, commit_message=""):
     if current_repos:
         for _, repo in current_repos.items():
             if repo["to_commit"]:
+                # Rancid-style backup: one commit per device per snapshot, in
+                # place of the single per-run commit. Only the backup repo is
+                # affected, and only when explicitly enabled; everything else
+                # falls through to the upstream commit/push below.
+                if constant.ENABLE_RANCID_BACKUP and _is_backup_repo(repo["repo_obj"]):
+                    rancid_commit_and_push(job, repo)
+                    continue
                 if not commit_message:
                     commit_message = f"{job.Meta.name.upper()} JOB {now}"
                 if not repo["repo_obj"].commit_with_added(commit_message):
                     job.logger.info(
-                        f'{repo["repo_obj"].nautobot_repo_obj.name}: no configuration changes to commit.',
+                        f"{repo['repo_obj'].nautobot_repo_obj.name}: no configuration changes to commit.",
                         extra={
                             "grouping": "GC Repo Commit and Push",
                             "object": repo["repo_obj"].nautobot_repo_obj,

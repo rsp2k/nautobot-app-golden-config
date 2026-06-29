@@ -14,6 +14,12 @@ ENABLE_DEPLOY = PLUGIN_CFG["enable_deploy"]
 ENABLE_POSTPROCESSING = PLUGIN_CFG["enable_postprocessing"]
 DEFAULT_DEPLOY_STATUS = PLUGIN_CFG["default_deploy_status"]
 
+# Rancid-style backup: one commit per device per snapshot, authored/dated from
+# the device's own config. Opt-in; when False the upstream single-commit-per-run
+# behavior is used unchanged. `.get()` keeps this safe if the key is absent.
+ENABLE_RANCID_BACKUP = PLUGIN_CFG.get("enable_rancid_backup", False)
+RANCID_EMAIL_DOMAIN = PLUGIN_CFG.get("rancid_email_domain", "example.com")
+
 CONFIG_FEATURES = {
     "intended": ENABLE_INTENDED,
     "compliance": ENABLE_COMPLIANCE,

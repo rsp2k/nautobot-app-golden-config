@@ -1,10 +1,14 @@
 """Unit tests for nautobot_golden_config utilities git."""
 
+import os
+import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import ANY, MagicMock, Mock, patch
 from urllib.parse import quote
 
 from django.conf import settings
+from git import Repo
 from git.exc import GitCommandError
 from nautobot.extras.datasources.git import get_repo_from_url_to_path_and_from_branch
 from packaging import version
@@ -104,6 +108,104 @@ class GitRepoCommitTest(unittest.TestCase):
 
         self.assertTrue(committed)
         mock_repo.index.commit.assert_called_once_with("Test commit")
+
+
+class GitRepoCommitFileTest(unittest.TestCase):
+    """Test GitRepo.commit_file() per-device rancid commits against a real Git repo."""
+
+    def setUp(self):
+        """Create a real temporary Git repo with a seed commit."""
+        self.tmp = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+        self.root = self.tmp.name
+        self.repo = Repo.init(self.root, initial_branch="main")
+        with self.repo.config_writer() as config:
+            config.set_value("user", "name", "Seed")
+            config.set_value("user", "email", "seed@example.com")
+        self._write("README.md", "seed\n")
+        self.repo.git.add("README.md")
+        self.repo.index.commit("seed")
+
+        # Bypass GitRepo.__init__ (which would clone); commit_file only needs .repo.
+        self.git_repo = GitRepo.__new__(GitRepo)
+        self.git_repo.repo = self.repo
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write(self, rel_path, content):
+        abs_path = os.path.join(self.root, rel_path)
+        os.makedirs(os.path.dirname(abs_path) or self.root, exist_ok=True)
+        with open(abs_path, "w", encoding="utf-8") as handle:
+            handle.write(content)
+
+    def test_commit_file_new_file_backdated_author(self):
+        """A new file is committed with the given author and backdated author/committer date."""
+        self._write("site1/rtr-a.cfg", "hostname rtr-a\n")
+        when = datetime(2025, 6, 24, 21, 32, 14, tzinfo=timezone.utc)
+
+        created = self.git_repo.commit_file("site1/rtr-a.cfg", "jdoe", "jdoe@example.com", when, "rtr-a: backup")
+
+        self.assertTrue(created)
+        head = self.repo.head.commit
+        self.assertEqual(head.author.name, "jdoe")
+        self.assertEqual(head.author.email, "jdoe@example.com")
+        self.assertEqual(head.authored_datetime, when)
+        self.assertEqual(head.message.strip(), "rtr-a: backup")
+
+    def test_commit_file_skips_when_unchanged(self):
+        """Re-committing identical content is a no-op that returns False."""
+        self._write("site1/rtr-a.cfg", "hostname rtr-a\n")
+        when = datetime(2025, 6, 24, tzinfo=timezone.utc)
+        self.assertTrue(self.git_repo.commit_file("site1/rtr-a.cfg", "jdoe", "jdoe@example.com", when, "first"))
+        before = self.repo.head.commit.hexsha
+
+        created = self.git_repo.commit_file("site1/rtr-a.cfg", "jdoe", "jdoe@example.com", when, "second")
+
+        self.assertFalse(created)
+        self.assertEqual(self.repo.head.commit.hexsha, before)
+
+    def test_commit_file_rename_is_followable(self):
+        """A rename (both files on disk) records a Git rename so log --follow traces history.
+
+        Real configs are large and mostly identical across a hostname change, which is
+        what lets Git's similarity-based rename detection connect the two files; the
+        content here mirrors that (only the hostname line changes).
+        """
+        original = "hostname rtr-a\n!\ninterface Gi0/0\n description uplink\n ip address 192.0.2.1 255.255.255.0\n!\n"
+        self._write("site1/rtr-a.cfg", original)
+        self.git_repo.commit_file(
+            "site1/rtr-a.cfg", "jdoe", "jdoe@example.com", datetime(2025, 1, 1, tzinfo=timezone.utc), "rtr-a: backup"
+        )
+        # Device renamed: the play wrote the new path; the old path is still tracked.
+        self._write("site1/rtr-a-new.cfg", original.replace("hostname rtr-a", "hostname rtr-a-new"))
+        when = datetime(2025, 1, 2, tzinfo=timezone.utc)
+
+        created = self.git_repo.commit_file(
+            "site1/rtr-a-new.cfg",
+            "jdoe",
+            "jdoe@example.com",
+            when,
+            "rtr-a-new (renamed from site1/rtr-a.cfg): backup",
+            previous_path="site1/rtr-a.cfg",
+        )
+
+        self.assertTrue(created)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "site1/rtr-a.cfg")))
+        self.assertIn("rtr-a-new", open(os.path.join(self.root, "site1/rtr-a-new.cfg"), encoding="utf-8").read())
+        follow = self.repo.git.log("--follow", "--pretty=%s", "--", "site1/rtr-a-new.cfg").splitlines()
+        self.assertEqual(len(follow), 2, f"--follow did not trace through the rename: {follow}")
+
+    def test_commit_file_missing_previous_path_treated_as_new(self):
+        """A stale previous_path (old file gone) does not error; the file commits as new."""
+        self._write("site1/rtr-b.cfg", "hostname rtr-b\n")
+        when = datetime(2025, 3, 3, tzinfo=timezone.utc)
+
+        created = self.git_repo.commit_file(
+            "site1/rtr-b.cfg", "jdoe", "jdoe@example.com", when, "rtr-b: backup", previous_path="site1/gone.cfg"
+        )
+
+        self.assertTrue(created)
+        self.assertEqual(self.repo.head.commit.message.strip(), "rtr-b: backup")
 
 
 @patch("nautobot.core.utils.git.os.path.isdir", Mock(return_value=True))

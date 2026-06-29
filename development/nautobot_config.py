@@ -147,6 +147,8 @@ PLUGINS_CONFIG = {
         "enable_postprocessing": is_truthy(os.environ.get("ENABLE_POSTPROCESSING", True)),
         "enable_plan": is_truthy(os.environ.get("ENABLE_PLAN", True)),
         "enable_deploy": is_truthy(os.environ.get("ENABLE_DEPLOY", True)),
+        "enable_rancid_backup": is_truthy(os.environ.get("ENABLE_RANCID_BACKUP", False)),
+        "rancid_email_domain": os.environ.get("RANCID_EMAIL_DOMAIN", "example.com"),
         "sot_agg_transposer": os.environ.get("SOT_AGG_TRANSPOSER"),
         "postprocessing_callables": os.environ.get("POSTPROCESSING_CALLABLES", []),
         "postprocessing_subscribed": os.environ.get("POSTPROCESSING_SUBSCRIBED", []),

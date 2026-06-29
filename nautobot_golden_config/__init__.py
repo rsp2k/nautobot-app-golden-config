@@ -28,6 +28,8 @@ class GoldenConfig(NautobotAppConfig):
         "enable_postprocessing": False,
         "enable_plan": True,
         "enable_deploy": True,
+        "enable_rancid_backup": False,
+        "rancid_email_domain": "example.com",
         "default_deploy_status": "Not Approved",
         "postprocessing_callables": [],
         "postprocessing_subscribed": [],
