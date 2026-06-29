@@ -116,6 +116,13 @@ the rendered `backup_path_template`) is detected and committed as a `git mv`. Th
 UUID-to-path mapping is stored in a `.golden-rancid-manifest.json` file inside the
 backup repository, so the feature keeps no state outside the repo.
 
+The resulting history is one commit per device per snapshot, each authored by the engineer
+named on the device's config and dated to the change time, with `git log --follow` tracing
+a device through a hostname rename:
+
+![Rancid-style git history](../images/ss1_rancid-history_light.png#only-light){ .on-glb }
+![Rancid-style git history](../images/ss1_rancid-history_dark.png#only-dark){ .on-glb }
+
 ### Enabling
 
 Set `enable_rancid_backup` to `True` in the app settings (see the
