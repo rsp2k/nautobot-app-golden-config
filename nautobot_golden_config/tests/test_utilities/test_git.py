@@ -195,6 +195,28 @@ class GitRepoCommitFileTest(unittest.TestCase):
         follow = self.repo.git.log("--follow", "--pretty=%s", "--", "site1/rtr-a-new.cfg").splitlines()
         self.assertEqual(len(follow), 2, f"--follow did not trace through the rename: {follow}")
 
+    def test_commit_file_appends_device_id_trailer(self):
+        """A device_id parameter is appended as a trailer in the commit message."""
+        self._write("site1/rtr-a.cfg", "hostname rtr-a\n")
+        device_id = "12345678-1234-5678-1234-567812345678"
+        when = datetime(2025, 6, 24, tzinfo=timezone.utc)
+
+        self.git_repo.commit_file(
+            "site1/rtr-a.cfg", "jdoe", "jdoe@example.com", when, "rtr-a: backup", device_id=device_id
+        )
+
+        commit = self.repo.head.commit
+        self.assertIn(f"Golden-Config-Device-Id: {device_id}", commit.message)
+
+    def test_commit_file_without_device_id_has_no_trailer(self):
+        """Omitting device_id (default None) leaves the message free of the trailer."""
+        self._write("site1/rtr-a.cfg", "hostname rtr-a\n")
+        when = datetime(2025, 6, 24, tzinfo=timezone.utc)
+
+        self.git_repo.commit_file("site1/rtr-a.cfg", "jdoe", "jdoe@example.com", when, "rtr-a: backup")
+
+        self.assertNotIn("Golden-Config-Device-Id", self.repo.head.commit.message)
+
     def test_commit_file_missing_previous_path_treated_as_new(self):
         """A stale previous_path (old file gone) does not error; the file commits as new."""
         self._write("site1/rtr-b.cfg", "hostname rtr-b\n")

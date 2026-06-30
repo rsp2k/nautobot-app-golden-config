@@ -14,6 +14,7 @@ from nautobot.apps.testing import TransactionTestCase
 from nautobot_golden_config.models import GoldenConfig
 from nautobot_golden_config.tests.conftest import create_device
 from nautobot_golden_config.utilities import rancid
+from nautobot_golden_config.utilities.config_parsers import get_parser
 from nautobot_golden_config.utilities.git import GitRepo
 
 
@@ -65,41 +66,54 @@ class ParseLastChangeTest(unittest.TestCase):
         self.assertIsNone(changed_at)
 
 
-class ManifestTest(unittest.TestCase):
-    """Test the rancid manifest round-trip."""
+# A Cisco Catalyst 9800 WLC (IOS-XE, driver cisco_xe) config fragment. All real
+# hostnames, usernames, and identities replaced with PLACEHOLDER / RFC 5737 IPs.
+_WLC_CONFIG = (
+    "! Last configuration change at 14:45:22 MDT Thu Jun 12 2026 by ENGINEER-PLACEHOLDER\n"
+    "! NVRAM config last updated at 15:02:10 MDT Thu Jun 12 2026 by ENGINEER-PLACEHOLDER\n"
+    "!\n"
+    "version 17.12\n"
+    "hostname WLC-PLACEHOLDER\n"
+    "license udi pid C9800-L-F-K9 sn FCLPLACEHOLDER\n"
+    "aaa new-model\n"
+    "!\n"
+    "end\n"
+)
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
-        self.root = self.tmp.name
 
-    def tearDown(self):
-        self.tmp.cleanup()
+class ParserRegistryTest(unittest.TestCase):
+    """Test the per-platform parser registry and Cisco WLC parsing."""
 
-    def test_load_missing_returns_empty(self):
-        """A repo with no manifest yields an empty map (every device is new)."""
-        self.assertEqual(rancid.load_manifest(self.root), {})
+    def test_get_parser_known_driver_returns_cisco(self):
+        """A registered driver returns its dedicated parser, not the generic one."""
+        from nautobot_golden_config.utilities.config_parsers import GenericParser
+        from nautobot_golden_config.utilities.config_parsers.cisco import CiscoParser
 
-    def test_save_then_load_round_trip(self):
-        """A saved map loads back identical."""
-        devices = {"uuid-2": "site2/b.cfg", "uuid-1": "site1/a.cfg"}
-        rancid.save_manifest(self.root, devices)
-        self.assertEqual(rancid.load_manifest(self.root), devices)
+        for driver in ("cisco_ios", "cisco_xe", "cisco_wlc"):
+            parser = get_parser(driver)
+            self.assertIsInstance(parser, CiscoParser)
+            self.assertNotIsInstance(parser, GenericParser)
 
-    def test_saved_manifest_is_stable(self):
-        """Saving the same map twice produces byte-identical output (diff-stable)."""
-        devices = {"uuid-2": "site2/b.cfg", "uuid-1": "site1/a.cfg"}
-        path = os.path.join(self.root, rancid.MANIFEST_NAME)
-        rancid.save_manifest(self.root, devices)
-        first = open(path, encoding="utf-8").read()
-        rancid.save_manifest(self.root, dict(reversed(list(devices.items()))))
-        second = open(path, encoding="utf-8").read()
-        self.assertEqual(first, second)
+    def test_get_parser_unknown_driver_returns_generic(self):
+        """An unknown or None driver falls back to the generic all-parsers parser."""
+        from nautobot_golden_config.utilities.config_parsers import GenericParser
 
-    def test_load_corrupt_returns_empty(self):
-        """A corrupt manifest degrades to empty rather than raising."""
-        with open(os.path.join(self.root, rancid.MANIFEST_NAME), "w", encoding="utf-8") as handle:
-            handle.write("{not valid json")
-        self.assertEqual(rancid.load_manifest(self.root), {})
+        self.assertIsInstance(get_parser("juniper_junos"), GenericParser)
+        self.assertIsInstance(get_parser(None), GenericParser)
+
+    def test_cisco_wlc_config_parses_via_cisco_xe(self):
+        """A Catalyst 9800 WLC config (cisco_xe) parses author + MDT timestamp."""
+        author, changed_at = rancid.parse_last_change(_WLC_CONFIG, network_driver="cisco_xe")
+        self.assertEqual(author, "ENGINEER-PLACEHOLDER")
+        self.assertIsNotNone(changed_at)
+        self.assertEqual((changed_at.year, changed_at.month, changed_at.day), (2026, 6, 12))
+        self.assertEqual((changed_at.hour, changed_at.minute, changed_at.second), (14, 45, 22))
+
+    def test_cisco_wlc_config_parses_via_generic_fallback(self):
+        """The same WLC config parses through the generic fallback (no driver)."""
+        author, changed_at = rancid.parse_last_change(_WLC_CONFIG)
+        self.assertEqual(author, "ENGINEER-PLACEHOLDER")
+        self.assertIsNotNone(changed_at)
 
 
 # Realistic config: most lines identical across a rename so Git's similarity-based
@@ -186,9 +200,20 @@ class RancidCommitAndPushTest(TransactionTestCase):
         self.assertIsNotNone(commit, "no commit was authored by the config's named engineer")
         self.assertEqual(commit.author.email, "jdoe@example.com")
         self.assertEqual(commit.authored_datetime, datetime(2025, 6, 24, 21, 32, 14, tzinfo=timezone.utc))
-        # Manifest now records the device's path.
-        manifest = rancid.load_manifest(self.root)
+        # Identity map (rebuilt from git trailers) records the device's path.
+        manifest = rancid.build_manifest_from_git(self.git_repo)
         self.assertEqual(manifest.get(str(self.device.id)), "rtr-a.cfg")
+
+    @patch.object(GitRepo, "push")
+    def test_commit_includes_device_id_trailer(self, _mock_push):
+        """Per-device commits include the Golden-Config-Device-Id trailer."""
+        self._write_backup("rtr-a.cfg", self.golden.backup_config)
+        rancid.rancid_commit_and_push(self.job, self._repo())
+
+        commit = self._commit_by_author("jdoe")
+        self.assertIsNotNone(commit)
+        self.assertIn("Golden-Config-Device-Id:", commit.message)
+        self.assertIn(str(self.device.id), commit.message)
 
     @patch.object(GitRepo, "push")
     def test_unchanged_backup_creates_no_commit(self, mock_push):
@@ -219,7 +244,73 @@ class RancidCommitAndPushTest(TransactionTestCase):
 
         self.assertEqual(count, 1)
         self.assertFalse(os.path.exists(os.path.join(self.root, "rtr-a.cfg")))
-        self.assertEqual(rancid.load_manifest(self.root).get(str(self.device.id)), "rtr-a-new.cfg")
+        self.assertEqual(rancid.build_manifest_from_git(self.git_repo).get(str(self.device.id)), "rtr-a-new.cfg")
         follow = self.repo.git.log("--follow", "--pretty=%s", "--", "rtr-a-new.cfg").splitlines()
         self.assertEqual(len(follow), 2, f"--follow did not trace through the rename: {follow}")
         self.assertEqual(mock_push.call_count, 2)
+
+
+class BuildIdentityMapTest(unittest.TestCase):
+    """Direct round-trip tests for build_manifest_from_git (trailer-based identity)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+        self.root = self.tmp.name
+        self.repo = Repo.init(self.root, initial_branch="main")
+        with self.repo.config_writer() as config:
+            config.set_value("user", "name", "Seed")
+            config.set_value("user", "email", "seed@example.com")
+        with open(os.path.join(self.root, "README.md"), "w", encoding="utf-8") as handle:
+            handle.write("seed\n")
+        self.repo.git.add("README.md")
+        self.repo.index.commit("seed (no device trailer)")
+        self.git_repo = GitRepo.__new__(GitRepo)
+        self.git_repo.repo = self.repo
+        self.when = datetime(2025, 6, 24, tzinfo=timezone.utc)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _backup(self, rel_path, content, device_id, previous_path=None):
+        os.makedirs(os.path.dirname(os.path.join(self.root, rel_path)) or self.root, exist_ok=True)
+        with open(os.path.join(self.root, rel_path), "w", encoding="utf-8") as handle:
+            handle.write(content)
+        self.git_repo.commit_file(
+            rel_path,
+            "eng",
+            "eng@example.com",
+            self.when,
+            f"{rel_path}: backup",
+            previous_path=previous_path,
+            device_id=device_id,
+        )
+
+    def test_empty_history_returns_empty(self):
+        """A repo with only non-device commits yields an empty map."""
+        self.assertEqual(rancid.build_manifest_from_git(self.git_repo), {})
+
+    def test_single_device_maps_to_its_path(self):
+        self._backup("site/rtr-a.cfg", "hostname rtr-a\nint g0\n desc x\n", "uuid-a")
+        self.assertEqual(rancid.build_manifest_from_git(self.git_repo), {"uuid-a": "site/rtr-a.cfg"})
+
+    def test_non_device_commit_is_ignored(self):
+        """A commit with no device-id trailer does not pollute the map."""
+        self._backup("site/rtr-a.cfg", "hostname rtr-a\nint g0\n desc x\n", "uuid-a")
+        with open(os.path.join(self.root, "NOTES.md"), "w", encoding="utf-8") as handle:
+            handle.write("ops note\n")
+        self.repo.git.add("NOTES.md")
+        self.repo.index.commit("ops note, no trailer")
+        self.assertEqual(rancid.build_manifest_from_git(self.git_repo), {"uuid-a": "site/rtr-a.cfg"})
+
+    def test_rename_maps_to_new_path(self):
+        body = "hostname {h}\nint g0\n desc uplink\n ip address 192.0.2.1 255.255.255.0\n"
+        self._backup("site/rtr-a.cfg", body.format(h="rtr-a"), "uuid-a")
+        self._backup("site/rtr-a-new.cfg", body.format(h="rtr-a-new"), "uuid-a", previous_path="site/rtr-a.cfg")
+        self.assertEqual(rancid.build_manifest_from_git(self.git_repo), {"uuid-a": "site/rtr-a-new.cfg"})
+
+    def test_two_sequential_renames_map_to_final_path(self):
+        body = "hostname {h}\nint g0\n desc uplink\n ip address 192.0.2.1 255.255.255.0\n"
+        self._backup("site/a.cfg", body.format(h="a"), "uuid-a")
+        self._backup("site/b.cfg", body.format(h="b"), "uuid-a", previous_path="site/a.cfg")
+        self._backup("site/c.cfg", body.format(h="c"), "uuid-a", previous_path="site/b.cfg")
+        self.assertEqual(rancid.build_manifest_from_git(self.git_repo), {"uuid-a": "site/c.cfg"})

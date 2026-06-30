@@ -69,6 +69,7 @@ class GitRepo(_GitRepo):  # pylint: disable=too-many-instance-attributes
         commit_datetime,
         message,
         previous_path=None,
+        device_id=None,
     ) -> bool:
         """Commit a single file as its own commit, rancid-style.
 
@@ -79,6 +80,11 @@ class GitRepo(_GitRepo):  # pylint: disable=too-many-instance-attributes
         as ``author_name``/``author_email`` with author and committer dates
         backdated to ``commit_datetime``.
 
+        When ``device_id`` is given, a ``Golden-Config-Device-Id`` trailer is
+        appended to the commit message so the device-identity map can be rebuilt
+        from ``git log`` alone (no shared manifest file). Trailers survive rebase,
+        so the map reconstructs correctly even after a concurrent-push recovery.
+
         Args:
             rel_path (str): repo-relative path of the file to commit.
             author_name (str): commit author/committer name.
@@ -86,6 +92,7 @@ class GitRepo(_GitRepo):  # pylint: disable=too-many-instance-attributes
             commit_datetime (datetime): timestamp for GIT_AUTHOR_DATE/GIT_COMMITTER_DATE.
             message (str): commit message.
             previous_path (str, optional): prior repo-relative path to ``git mv`` from.
+            device_id (str, optional): Nautobot Device UUID to record as a trailer.
 
         Returns:
             bool: True if a commit was created, False if there was nothing to commit.
@@ -114,6 +121,9 @@ class GitRepo(_GitRepo):  # pylint: disable=too-many-instance-attributes
         if not self.repo.git.status("--porcelain", "--", *paths).strip():
             LOGGER.debug("No staged change for `%s`; skipping commit", rel_path)
             return False
+
+        if device_id:
+            message = f"{message}\n\nGolden-Config-Device-Id: {device_id}"
 
         date_str = commit_datetime.isoformat() if hasattr(commit_datetime, "isoformat") else str(commit_datetime)
         env = {

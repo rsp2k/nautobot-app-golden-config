@@ -112,9 +112,16 @@ a rancid archive does:
 | Hostname renames | new file appears, old one orphaned | recorded as a git rename, so `git log --follow` traces the device |
 
 Device identity is the stable Nautobot Device UUID, so a hostname rename (which changes
-the rendered `backup_path_template`) is detected and committed as a `git mv`. The
-UUID-to-path mapping is stored in a `.golden-rancid-manifest.json` file inside the
-backup repository, so the feature keeps no state outside the repo.
+the rendered `backup_path_template`) is detected and committed as a `git mv`. Each commit
+records its device with a `Golden-Config-Device-Id` git trailer, and the UUID-to-path
+mapping is rebuilt from those trailers on every run — there is no state outside the git
+history itself. Because nothing shared is rewritten per run, concurrent backup jobs never
+collide on a manifest file when a push triggers a rebase.
+
+Parsing of the `Last configuration change` line is per-platform: a small parser registry
+keyed by the device's `network_driver` (Cisco IOS, IOS-XE, and Catalyst 9800 WLC ship
+today) makes it straightforward to add other vendors, with a generic fallback for
+unregistered drivers.
 
 The resulting history is one commit per device per snapshot, each authored by the engineer
 named on the device's config and dated to the change time, with `git log --follow` tracing
