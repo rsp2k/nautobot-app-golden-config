@@ -161,11 +161,23 @@ def build_snapshots(job, repo_obj, logger):
     domain = constant.RANCID_EMAIL_DOMAIN
     fallback_name, fallback_email = _fallback_identity(repo_obj.repo, domain)
 
+    # Devices whose settings target this backup repo, then their GoldenConfig rows
+    # in a single query (with device + platform joined) instead of one query per
+    # device — important for large fleets.
+    device_ids = [
+        device_id
+        for device_id, settings in job.device_to_settings_map.items()
+        if getattr(settings, "backup_repository_id", None) == repo_id
+    ]
+    golden_by_device = {
+        golden.device_id: golden
+        for golden in GoldenConfig.objects.filter(device_id__in=device_ids).select_related("device", "device__platform")
+    }
+
     snapshots = []
-    for device_id, settings in job.device_to_settings_map.items():
-        if getattr(settings, "backup_repository_id", None) != repo_id:
-            continue
-        golden = GoldenConfig.objects.filter(device_id=device_id).first()
+    for device_id in device_ids:
+        settings = job.device_to_settings_map[device_id]
+        golden = golden_by_device.get(device_id)
         if not golden or not golden.backup_config:
             continue
 
@@ -212,7 +224,11 @@ def build_snapshots(job, repo_obj, logger):
 
 def _commit_message(snap, renamed_from):
     """Compose the per-device commit subject."""
-    when = snap["commit_time"].strftime("%Y-%m-%d %H:%M %Z").strip()
+    moment = snap["commit_time"]
+    when = moment.strftime("%Y-%m-%d %H:%M")
+    zone = moment.strftime("%Z")
+    if zone:  # only append the zone when the datetime actually carries a name
+        when = f"{when} {zone}"
     if renamed_from:
         return f"{snap['device_name']} (renamed from {renamed_from}): backup @ {when}"
     return f"{snap['device_name']}: backup @ {when}"

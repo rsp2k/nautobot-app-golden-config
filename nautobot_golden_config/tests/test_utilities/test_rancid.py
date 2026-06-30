@@ -3,10 +3,12 @@
 import os
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
 
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.utils.timezone import make_aware
 from git import Repo
 from nautobot.apps.testing import TransactionTestCase
@@ -249,6 +251,26 @@ class RancidCommitAndPushTest(TransactionTestCase):
         self.assertEqual(len(follow), 2, f"--follow did not trace through the rename: {follow}")
         self.assertEqual(mock_push.call_count, 2)
 
+    def test_build_snapshots_avoids_n_plus_one(self):
+        """GoldenConfig rows are fetched in one query regardless of device count."""
+        for name in ("rtr-b", "rtr-c"):
+            device = create_device(name=name)
+            GoldenConfig.objects.create(
+                device=device,
+                backup_config=_config(name),
+                backup_last_success_date=make_aware(datetime(2025, 6, 24, 21, 32, 14)),
+            )
+            self.job.device_to_settings_map[device.id] = self.settings
+
+        with CaptureQueriesContext(connection) as ctx:
+            snapshots = rancid.build_snapshots(self.job, self.git_repo, self.job.logger)
+
+        self.assertEqual(len(snapshots), 3)
+        # One prefetch query for all three devices; an N+1 would be >= 3.
+        self.assertLessEqual(
+            len(ctx), 2, f"build_snapshots issued {len(ctx)} queries: {[q['sql'][:70] for q in ctx.captured_queries]}"
+        )
+
 
 class BuildIdentityMapTest(unittest.TestCase):
     """Direct round-trip tests for build_manifest_from_git (trailer-based identity)."""
@@ -314,3 +336,38 @@ class BuildIdentityMapTest(unittest.TestCase):
         self._backup("site/b.cfg", body.format(h="b"), "uuid-a", previous_path="site/a.cfg")
         self._backup("site/c.cfg", body.format(h="c"), "uuid-a", previous_path="site/b.cfg")
         self.assertEqual(rancid.build_manifest_from_git(self.git_repo), {"uuid-a": "site/c.cfg"})
+
+
+class _NoNameTZ(tzinfo):
+    """A timezone whose tzname() is None, so strftime('%Z') renders empty."""
+
+    def utcoffset(self, dt):
+        return timedelta(0)
+
+    def tzname(self, dt):
+        return None
+
+    def dst(self, dt):
+        return timedelta(0)
+
+
+class CommitMessageTest(unittest.TestCase):
+    """Test _commit_message timezone handling (no trailing space when %Z is empty)."""
+
+    def test_includes_zone_when_present(self):
+        snap = {"device_name": "rtr-x", "commit_time": datetime(2025, 6, 24, 21, 32, tzinfo=timezone.utc)}
+        self.assertEqual(rancid._commit_message(snap, None), "rtr-x: backup @ 2025-06-24 21:32 UTC")
+
+    def test_no_trailing_space_when_zone_empty(self):
+        snap = {"device_name": "rtr-x", "commit_time": datetime(2025, 6, 24, 21, 32, tzinfo=_NoNameTZ())}
+        message = rancid._commit_message(snap, None)
+        self.assertEqual(message, "rtr-x: backup @ 2025-06-24 21:32")
+        self.assertFalse(message.endswith(" "))
+        self.assertNotIn("  ", message)
+
+    def test_rename_note_with_empty_zone(self):
+        snap = {"device_name": "rtr-y", "commit_time": datetime(2025, 6, 24, 21, 32, tzinfo=_NoNameTZ())}
+        self.assertEqual(
+            rancid._commit_message(snap, "site/old.cfg"),
+            "rtr-y (renamed from site/old.cfg): backup @ 2025-06-24 21:32",
+        )
